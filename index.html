@@ -3,8 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Quran Reader - Recitation & Audio</title>
-    <!-- Importing Amiri font for perfect Uthmanic Arabic rendering -->
+    <title>Quran Reader with Voice Recorder</title>
     <link href="https://fonts.googleapis.com/css2?family=Amiri&display=swap" rel="stylesheet">
     <style>
         body {
@@ -49,9 +48,34 @@
             text-align: left;
             direction: ltr;
         }
+        .audio-section {
+            margin-top: 15px;
+            padding-top: 10px;
+            border-top: 1px dashed #ddd;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .recorder-controls {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        button {
+            padding: 8px 15px;
+            font-size: 0.95rem;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            color: white;
+        }
+        .btn-record { background-color: #e74c3c; }
+        .btn-record:hover { background-color: #c0392b; }
+        .btn-stop { background-color: #7f8c8d; }
+        .btn-stop:disabled { background-color: #bdc3c7; cursor: not-allowed; }
         audio {
             width: 100%;
-            height: 40px;
+            height: 35px;
         }
     </style>
 </head>
@@ -63,10 +87,9 @@
     </div>
 
     <script>
-        async function loadSurahWithAudio() {
+        async function loadSurahWithRecorder() {
             try {
-                // Fetching Surah 1 (Al-Fatihah) with Uthmanic text (has all Kasra/Damma), 
-                // English translation, and Mishary Alafasy audio
+                // Fetching Surah 1 with full Uthmanic text, translation, and professional audio
                 const response = await fetch('https://api.alquran.cloud/v1/surah/1/editions/quran-uthmani,en.sahih,ar.alafasy');
                 const data = await response.json();
 
@@ -75,37 +98,83 @@
                     const translationEdition = data.data[1];
                     const audioEdition = data.data[2];
 
-                    // Set Title
                     document.getElementById('surah-title').innerText = `${arabicEdition.englishName} (${arabicEdition.name})`;
 
                     const container = document.getElementById('verses-container');
                     container.innerHTML = '';
 
-                    // Loop through each ayah and combine text, translation, and audio
                     arabicEdition.ayahs.forEach((ayah, index) => {
                         const translationText = translationEdition.ayahs[index].text;
-                        const audioUrl = audioEdition.ayahs[index].audio;
+                        const proAudioUrl = audioEdition.ayahs[index].audio;
+                        const verseId = ayah.numberInSurah;
 
                         const card = document.createElement('div');
                         card.className = 'ayah-card';
                         card.innerHTML = `
-                            <div class="arabic-text">${ayah.text} ﴿${ayah.numberInSurah}﴾</div>
-                            <div class="translation-text">${ayah.numberInSurah}. ${translationText}</div>
-                            <audio controls>
-                                <source src="${audioUrl}" type="audio/mpeg">
-                                متصفحك لا يدعم مشغل الصوتي
-                            </audio>
+                            <div class="arabic-text">${ayah.text} ﴿${verseId}﴾</div>
+                            <div class="translation-text">${verseId}. ${translationText}</div>
+                            
+                            <div class="audio-section">
+                                <div><strong>القارئ المحترف (Listen):</strong></div>
+                                <audio controls src="${proAudioUrl}"></audio>
+                                
+                                <div><strong>تسجيل صوتك (Record Yourself):</strong></div>
+                                <div class="recorder-controls">
+                                    <button class="btn-record" onclick="startRecording(${verseId})">🔴 تسجيل</button>
+                                    <button class="btn-stop" id="stop-btn-${verseId}" onclick="stopRecording(${verseId})" disabled>⏹ إيقاف</button>
+                                </div>
+                                <audio id="playback-${verseId}" controls style="display:none; margin-top:5px;"></audio>
+                            </div>
                         `;
                         container.appendChild(card);
                     });
                 }
             } catch (error) {
-                console.error('Error fetching data:', error);
+                console.error('Error:', error);
                 document.getElementById('surah-title').innerText = 'حدث خطأ أثناء تحميل البيانات.';
             }
         }
 
-        loadSurahWithAudio();
+        let mediaRecorder;
+        let audioChunks = [];
+
+        async function startRecording(verseId) {
+            audioChunks = [];
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                mediaRecorder = new MediaRecorder(stream);
+
+                mediaRecorder.ondataavailable = event => {
+                    audioChunks.push(event.data);
+                };
+
+                mediaRecorder.onstop = () => {
+                    const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                    const audioUrl = URL.createObjectURL(audioBlob);
+                    
+                    const playbackElement = document.getElementById(`playback-${verseId}`);
+                    playbackElement.src = audioUrl;
+                    playbackElement.style.display = 'block';
+                };
+
+                mediaRecorder.start();
+                
+                // Toggle button states
+                document.getElementById(`stop-btn-${verseId}`).disabled = false;
+            } catch (err) {
+                alert("يرجى السماح للبراوزر بالوصول إلى الميكروفون.");
+                console.error(err);
+            }
+        }
+
+        function stopRecording(verseId) {
+            if (mediaRecorder) {
+                mediaRecorder.stop();
+                document.getElementById(`stop-btn-${verseId}`).disabled = true;
+            }
+        }
+
+        loadSurahWithRecorder();
     </script>
 
 </body>
