@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quran Voice Check</title>
+<link href="https://fonts.googleapis.com/css2?family=Amiri+Quran&family=Inter:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#f2f5f1; --ink:#14231c; --muted:#5d6f66; --card:#ffffff;
+    --ok:#1b7a4b; --bad:#c0392b; --miss:#b9770e; --pend:#14231c;
+    --accent:#14231c; --line:#d5ddd7;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{--bg:#0f1a15; --ink:#e8f0eb; --muted:#93a69b; --card:#17261f;
+      --ok:#4cc38a; --bad:#ff7b6b; --miss:#f0b04a; --pend:#e8f0eb;
+      --accent:#e8f0eb; --line:#27382f;}
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{background:var(--bg);color:var(--ink);font-family:Inter,system-ui,sans-serif;
+    padding:env(safe-area-inset-top,0) 16px env(safe-area-inset-bottom,0);}
+  main{max-width:640px;margin:0 auto;padding:16px 0 40px}
+  .row{display:flex;gap:8px;direction:ltr}
+  select,button{font:inherit;font-size:16px;border-radius:10px;border:1px solid var(--line);
+    background:var(--card);color:var(--ink);padding:12px}
+  select{flex:1;min-width:0}
+  #ayahSel{flex:0 0 90px}
+  .verse{background:var(--card);border:1px solid var(--line);border-radius:14px;
+    margin:16px 0;padding:22px 18px;font-family:'Amiri Quran',serif;font-size:30px;
+    line-height:2.1;min-height:140px}
+  .w{padding:0 3px;border-radius:6px;transition:color .15s}
+  .w.pending{color:var(--pend);opacity:.9}
+  .w.ok{color:var(--ok)}
+  .w.bad{color:var(--bad);text-decoration:underline wavy;text-underline-offset:8px}
+  .w.miss{color:var(--miss);text-decoration:underline dotted;text-underline-offset:8px}
+  .heard{direction:rtl;font-family:'Amiri Quran',serif;font-size:20px;color:var(--muted);
+    min-height:34px;margin:0 0 12px}
+  #mic{flex:1;background:var(--accent);color:var(--bg);font-weight:600;border:none;padding:16px}
+  #mic.on{background:var(--bad);color:#fff}
+  .stat{direction:ltr;text-align:left;color:var(--muted);font-size:14px;margin:12px 0 0}
+  .legend{direction:ltr;display:flex;gap:14px;font-size:13px;color:var(--muted);margin-top:8px}
+  .legend b{font-weight:600}
+  .legend .a{color:var(--ok)}.legend .b{color:var(--bad)}.legend .c{color:var(--miss)}
+  #msg{direction:ltr;color:var(--bad);font-size:14px;margin-top:10px;min-height:20px}
+</style>
+</head>
+<body>
+<main>
+  <div class="row">
+    <select id="surahSel" aria-label="Surah"></select>
+    <select id="ayahSel" aria-label="Ayah"></select>
+  </div>
+
+  <div class="verse" id="verse">…</div>
+  <p class="heard" id="heard"></p>
+
+  <div class="row">
+    <button id="mic">Start reciting</button>
+    <button id="next">Next ayah</button>
+  </div>
+
+  <div class="legend">
+    <span class="a"><b>Correct</b></span>
+    <span class="b"><b>Wrong</b></span>
+    <span class="c"><b>Missed</b></span>
+  </div>
+  <p class="stat" id="stat"></p>
+  <p id="msg"></p>
+</main>
+
+<script>
+const API = 'https://api.alquran.cloud/v1';
+const $ = id => document.getElementById(id);
+const surahSel = $('surahSel'), ayahSel = $('ayahSel'), verseEl = $('verse'),
+      heardEl = $('heard'), micBtn = $('mic'), nextBtn = $('next'),
+      statEl = $('stat'), msgEl = $('msg');
+
+let surahs = [];
+let display = [];   // words with tashkeel (for showing)
+let target = [];    // normalized words (for comparing)
+let heardWords = [];
+let recog = null, listening = false;
+let finalText = '', interimText = '';
+
+/* ---------- Arabic normalization ---------- */
+function norm(s){
+  return s
+    .replace(/[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED\u0640]/g,'') // tashkeel, tatweel, quran marks
+    .replace(/[أإآٱ]/g,'ا')
+    .replace(/ى/g,'ي')
+    .replace(/ة/g,'ه')
+    .replace(/ؤ/g,'و').replace(/ئ/g,'ي')
+    .replace(/[^\u0621-\u064A\s]/g,'')
+    .replace(/\s+/g,' ').trim();
+}
+const words = s => norm(s).split(' ').filter(Boolean);
+
+/* ---------- Similarity ---------- */
+function lev(a,b){
+  const m=a.length,n=b.length; if(!m) return n; if(!n) return m;
+  let prev=Array.from({length:n+1},(_,j)=>j);
+  for(let i=1;i<=m;i++){
+    const cur=[i];
+    for(let j=1;j<=n;j++){
+      cur[j]=Math.min(prev[j]+1,cur[j-1]+1,prev[j-1]+(a[i-1]===b[j-1]?0:1));
+    }
+    prev=cur;
+  }
+  return prev[n];
+}
+const sim = (a,b) => 1 - lev(a,b)/Math.max(a.length,b.length,1);
+const MATCH = 0.72; // tolerance for speech-recognition spelling noise
+
+/* ---------- Alignment (expected vs heard) ---------- */
+function align(exp, got, finished){
+  const n=exp.length, m=got.length;
+  const dp=Array.from({length:n+1},()=>new Array(m+1).fill(0));
+  const bt=Array.from({length:n+1},()=>new Array(m+1).fill(0));
+  for(let i=1;i<=n;i++){dp[i][0]=i;bt[i][0]=2;}
+  for(let j=1;j<=m;j++){dp[0][j]=j;bt[0][j]=3;}
+  for(let i=1;i<=n;i++){
+    for(let j=1;j<=m;j++){
+      const s=sim(exp[i-1],got[j-1]);
+      const sub=dp[i-1][j-1]+(s>=MATCH?0:1);
+      const del=dp[i-1][j]+1;   // expected word not heard
+      const ins=dp[i][j-1]+1;   // extra heard word
+      let best=sub,t=1;
+      if(del<best){best=del;t=2}
+      if(ins<best){best=ins;t=3}
+      dp[i][j]=best;bt[i][j]=t;
+    }
+  }
+  // while live, trailing words not yet reached are "pending", not missed
+  let endI=n;
+  if(!finished){
+    let min=Infinity;
+    for(let i=0;i<=n;i++) if(dp[i][m]<=min){min=dp[i][m];endI=i;}
+  }
+  const status=new Array(n).fill('pending');
+  let i=endI,j=m;
+  while(i>0||j>0){
+    const t=bt[i][j];
+    if(i>0&&j>0&&t===1){
+      status[i-1]=sim(exp[i-1],got[j-1])>=MATCH?'ok':'bad';
+      i--;j--;
+    } else if(i>0&&(t===2||j===0)){status[i-1]='miss';i--;}
+    else {j--;}
+  }
+  return status;
+}
+
+/* ---------- Render ---------- */
+function render(finished=false){
+  const status = heardWords.length||finished
+    ? align(target,heardWords,finished)
+    : target.map(()=> 'pending');
+  verseEl.innerHTML = display.map((w,i)=>`<span class="w ${status[i]}">${w}</span>`).join(' ');
+  heardEl.textContent = (finalText+' '+interimText).trim();
+  if(heardWords.length||finished){
+    const c=k=>status.filter(s=>s===k).length;
+    statEl.textContent = `Correct ${c('ok')} · Wrong ${c('bad')} · Missed ${c('miss')} · Left ${c('pending')}`;
+  } else statEl.textContent='';
+}
+
+/* ---------- Data ---------- */
+async function loadSurahs(){
+  const r=await fetch(`${API}/surah`); const j=await r.json();
+  surahs=j.data;
+  surahSel.innerHTML=surahs.map(s=>`<option value="${s.number}">${s.number}. ${s.name} — ${s.englishName}</option>`).join('');
+  fillAyahs();
+}
+function fillAyahs(){
+  const s=surahs[surahSel.value-1];
+  ayahSel.innerHTML=Array.from({length:s.numberOfAyahs},(_,i)=>`<option>${i+1}</option>`).join('');
+  loadAyah();
+}
+async function loadAyah(){
+  stop(); resetHeard();
+  verseEl.textContent='…';
+  try{
+    const r=await fetch(`${API}/ayah/${surahSel.value}:${ayahSel.value}/editions/quran-uthmani,quran-simple-clean`);
+    const j=await r.json();
+    let uth=j.data[0].text, clean=j.data[1].text;
+    // strip basmala glued to ayah 1 (except Fatiha, where it IS ayah 1)
+    if(ayahSel.value==='1' && surahSel.value!=='1' && surahSel.value!=='9'){
+      uth=uth.split(' ').slice(4).join(' ');
+      clean=clean.split(' ').slice(4).join(' ');
+    }
+    display=uth.split(/\s+/).filter(Boolean);
+    target=words(clean);
+    // keep display and target the same length; fall back if they diverge
+    if(display.length!==target.length) display=target.slice();
+    render();
+  }catch(e){ msgEl.textContent='Could not load the ayah. Check your internet connection.'; }
+}
+function resetHeard(){ heardWords=[]; finalText=''; interimText=''; msgEl.textContent=''; }
+
+/* ---------- Speech recognition ---------- */
+function setup(){
+  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+  if(!SR){ msgEl.textContent='Speech recognition is not supported here. Use Chrome on Android or desktop.'; micBtn.disabled=true; return; }
+  recog=new SR();
+  recog.lang='ar-SA';
+  recog.continuous=true;
+  recog.interimResults=true;
+  recog.maxAlternatives=1;
+
+  recog.onresult=e=>{
+    interimText='';
+    for(let i=e.resultIndex;i<e.results.length;i++){
+      const t=e.results[i][0].transcript;
+      if(e.results[i].isFinal) finalText+=' '+t; else interimText+=t;
+    }
+    heardWords=words(finalText+' '+interimText);
+    render(false);
+  };
+  recog.onerror=e=>{
+    if(e.error==='not-allowed'||e.error==='service-not-allowed'){
+      msgEl.textContent='Microphone blocked. Allow mic access and open this page over https.';
+      listening=false; ui();
+    } else if(e.error!=='no-speech'&&e.error!=='aborted'){
+      msgEl.textContent='Speech error: '+e.error;
+    }
+  };
+  recog.onend=()=>{ // Chrome ends sessions on silence; restart while user is still reciting
+    if(listening){ try{recog.start();}catch(_){} }
+  };
+}
+function start(){
+  resetHeard(); render(false);
+  listening=true; ui();
+  try{recog.start();}catch(_){}
+}
+function stop(){
+  if(!listening) return;
+  listening=false; ui();
+  try{recog.stop();}catch(_){}
+  render(true);
+}
+function ui(){
+  micBtn.classList.toggle('on',listening);
+  micBtn.textContent=listening?'Stop':'Start reciting';
+}
+
+micBtn.onclick=()=> listening?stop():start();
+nextBtn.onclick=()=>{
+  const s=surahs[surahSel.value-1];
+  if(+ayahSel.value<s.numberOfAyahs){ ayahSel.value=+ayahSel.value+1; loadAyah(); }
+  else if(+surahSel.value<114){ surahSel.value=+surahSel.value+1; fillAyahs(); }
+};
+surahSel.onchange=fillAyahs;
+ayahSel.onchange=loadAyah;
+
+setup();
+loadSurahs().catch(()=>{ msgEl.textContent='Could not load surah list. Check your internet connection.'; });
+</script>
+</body>
+</html>
